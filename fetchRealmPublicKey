@@ -4,201 +4,176 @@
 public class RealmPublicKeyRefresher {
 
     private final OAuthProps props;
-    private final TokenValidationService tokenValidationService;
     private final RestTemplate restTemplate = new RestTemplate();
 
-    public void refreshKey() {
-        try {
-            String url = "https://" + props.baseUrl() + "/oauth/token_key";
+    public String fetchPublicKey() {
+        String url = "https://" + props.baseUrl() + "/oauth/token_key";
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setBasicAuth(props.clientId(), props.secret());
-            HttpEntity<Void> request = new HttpEntity<>(headers);
+        log.debug("Calling OAuth server for latest public key: {}", url);
 
-            ResponseEntity<Map> response = restTemplate.exchange(url, HttpMethod.GET, request, Map.class);
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBasicAuth(props.clientId(), props.secret());
+        HttpEntity<Void> request = new HttpEntity<>(headers);
 
-            String pemKey = (String) response.getBody().get("value");  // PEM format
+        ResponseEntity<Map> response =
+                restTemplate.exchange(url, HttpMethod.GET, request, Map.class);
 
-            // Remove header/footer and new lines
-            String cleanKey = pemKey
-                    .replace("-----BEGIN PUBLIC KEY-----", "")
-                    .replace("-----END PUBLIC KEY-----", "")
-                    .replaceAll("\\s+", "");
+        String pem = (String) response.getBody().get("value");
 
-            tokenValidationService.updatePublicKey(cleanKey);
+        log.info("✅ Successfully fetched latest public key from OAuth server");
 
-            log.info("✅ Realm public key refreshed successfully");
-
-        } catch (Exception e) {
-            log.error("❌ Failed to refresh realmPublicKey: {}", e.getMessage());
-        }
+        return pem.replace("-----BEGIN PUBLIC KEY-----", "")
+                  .replace("-----END PUBLIC KEY-----", "")
+                  .replaceAll("\\s+", "");
     }
 }
--------------------
+-------------------------------
+
 @Component
 @RequiredArgsConstructor
 @Slf4j
 public class TokenValidationService {
 
     private final OAuthProps oAuthProps;
-    private volatile RSAPublicKey pubKey;
+    private final RealmPublicKeyRefresher refresher;
+    private volatile RSAPublicKey pubKey; // Active in-memory key
 
     @PostConstruct
     public void init() {
-        updatePublicKey(oAuthProps.realmPublicKey());
-    }
+        log.info("🔄 Initializing realm public key...");
 
-    public void updatePublicKey(String base64Key) {
         try {
-            X509EncodedKeySpec keySpecX509 = new X509EncodedKeySpec(Base64.getDecoder().decode(base64Key));
-            this.pubKey = (RSAPublicKey) KeyFactory.getInstance(oAuthProps.realmPublicKeyAlgorithm())
-                    .generatePublic(keySpecX509);
+            updateKey(refresher.fetchPublicKey());
+            log.info("✅ Public key loaded from OAuth server at startup");
+            return;
         } catch (Exception e) {
-            log.error("ERROR updating realmPublicKey: {}", e.getMessage());
+            log.warn("⚠ OAuth server fetch failed at startup. Falling back to local key. Reason: {}", e.getMessage());
         }
-    }
 
-    public TokenValidation validateToken(String token) {
         try {
-            Claims claims = Jwts.parser()
-                    .verifyWith(pubKey)
-                    .build()
-                    .parseSignedClaims(token)
-                    .getPayload();
-
-            return new TokenValidation(true, null,
-                    claims.get("user_name", String.class),
-                    claims.get("scope", ArrayList.class));
-
-        } catch (JwtException e) {
-            log.warn("Token validation failed: {}", e.getMessage());
-            return new TokenValidation(false, e.getMessage(), null, null);
+            updateKey(oAuthProps.realmPublicKey());
+            log.info("✅ Fallback public key loaded from application.properties");
+        } catch (Exception ex) {
+            log.error("❌ Critical: Could not load fallback public key. Application may fail to validate tokens.");
         }
     }
+
+    public void updateKey(String base64Key) {
+        try {
+            X509EncodedKeySpec keySpec =
+                    new X509EncodedKeySpec(Base64.getDecoder().decode(base64Key));
+
+            this.pubKey = (RSAPublicKey) KeyFactory.getInstance(oAuthProps.realmPublicKeyAlgorithm())
+                    .generatePublic(keySpec);
+
+            log.info("🔑 Public key updated in memory");
+        } catch (Exception ex) {
+            log.error("❌ Failed to update public key: {}", ex.getMessage());
+        }
+    }
+
+    // NOTE: validateToken() remains unchanged in your system.
 }
-------------------
+-------------------------------------------
 @Configuration
 @EnableScheduling
 @RequiredArgsConstructor
+@Slf4j
 public class RealmKeyScheduler {
 
+    private final TokenValidationService tokenValidationService;
     private final RealmPublicKeyRefresher refresher;
 
     // Refresh every 12 hours
     @Scheduled(cron = "0 0 */12 * * *")
-    public void runRefresh() {
-        refresher.refreshKey();
+    public void scheduledRefresh() {
+        log.info("⏱ Scheduled public key refresh triggered...");
+        try {
+            tokenValidationService.updateKey(refresher.fetchPublicKey());
+            log.info("✅ Public key successfully refreshed by scheduler");
+        } catch (Exception e) {
+            log.warn("⚠ Scheduler refresh failed: {}", e.getMessage());
+        }
     }
 }
-++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+------------------------------------------------------------------------------------
 
-@PostConstruct
-public void init() {
+✅ JUnit 5 Tests (No Getters Used)
+Helper to access private key
+
+private RSAPublicKey extractPubKey(TokenValidationService service) {
     try {
-        log.info("🔄 Attempting to fetch latest realm public key from OAuth server...");
-        refresher.refreshKey(); // If successful, pubKey is updated
-        log.info("✅ Realm public key successfully loaded from OAuth server at startup");
-        return; // Exit method since key is successfully loaded
+        Field field = TokenValidationService.class.getDeclaredField("pubKey");
+        field.setAccessible(true);
+        return (RSAPublicKey) field.get(service);
     } catch (Exception e) {
-        log.warn("⚠ Failed to fetch realm public key from OAuth server: {}. Falling back to local key.",
-                e.getMessage());
+        throw new RuntimeException(e);
     }
-
-    // Fallback logic executes ONLY if an exception occurred in the try-block
+}
+----------------------------
+Generate test RSA key
+private String generateBase64RsaPublicKey() {
     try {
-        X509EncodedKeySpec keySpecX509 =
-                new X509EncodedKeySpec(Base64.getDecoder().decode(oAuthProps.realmPublicKey()));
-
-        pubKey = (RSAPublicKey) KeyFactory.getInstance(oAuthProps.realmPublicKeyAlgorithm())
-                .generatePublic(keySpecX509);
-
-        log.info("✅ Fallback realmPublicKey successfully loaded from application.properties");
-
-    } catch (InvalidKeySpecException | NoSuchAlgorithmException ex) {
-        log.error("❌ Failed to load fallback realmPublicKey from application.properties: {}", ex.getMessage());
-        // Optionally: fail startup or leave pubKey = null (but failure is safer)
+        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
+        keyGen.initialize(2048);
+        return Base64.getEncoder().encodeToString(keyGen.generateKeyPair().getPublic().getEncoded());
+    } catch (Exception e) {
+        throw new RuntimeException(e);
     }
 }
 ---------------------------
 @ExtendWith(MockitoExtension.class)
-class TokenValidationServiceSuccessTest {
+class TokenValidationServiceInitSuccessTest {
 
-    @Mock
-    private OAuthProps oAuthProps;
-
-    @Mock
-    private RealmPublicKeyRefresher refresher;
-
-    @InjectMocks
-    private TokenValidationService tokenValidationService;
+    @Mock OAuthProps props;
+    @Mock RealmPublicKeyRefresher refresher;
+    @InjectMocks TokenValidationService service;
 
     @Test
-    void testInitFetchesKeySuccessfully() {
-        // Arrange: refresher.refreshKey() should succeed (do nothing)
-        doNothing().when(refresher).refreshKey();
+    void testInit_LoadsKeyFromServer() {
+        when(props.realmPublicKeyAlgorithm()).thenReturn("RSA");
+        when(refresher.fetchPublicKey()).thenReturn(generateBase64RsaPublicKey());
 
-        // Act
-        tokenValidationService.init();
+        service.init();
 
-        // Assert: pubKey should be updated by refresher
-        // refresher calls updatePublicKey(), so we simulate that
-        tokenValidationService.updatePublicKey(generateTestKey());
-
-        assertNotNull(tokenValidationService.getPubKey(), "Public key should be loaded");
-    }
-
-    // Generates a real RSA key for testing (base64 encoded X509)
-    private String generateTestKey() {
-        KeyPairGenerator keyGen;
-        try {
-            keyGen = KeyPairGenerator.getInstance("RSA");
-            keyGen.initialize(2048);
-            RSAPublicKey publicKey = (RSAPublicKey) keyGen.generateKeyPair().getPublic();
-            return Base64.getEncoder().encodeToString(publicKey.getEncoded());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertNotNull(extractPubKey(service), "Public key must be loaded from server at startup");
     }
 }
---------------------------------
+------------------------------------
 @ExtendWith(MockitoExtension.class)
-class TokenValidationServiceFallbackTest {
+class TokenValidationServiceInitFallbackTest {
 
-    @Mock
-    private OAuthProps oAuthProps;
-
-    @Mock
-    private RealmPublicKeyRefresher refresher;
-
-    @InjectMocks
-    private TokenValidationService tokenValidationService;
+    @Mock OAuthProps props;
+    @Mock RealmPublicKeyRefresher refresher;
+    @InjectMocks TokenValidationService service;
 
     @Test
-    void testInitFallsBackToLocalKeyWhenServerFails() {
-        // Arrange
-        doThrow(new RuntimeException("Server down")).when(refresher).refreshKey();
-        when(oAuthProps.realmPublicKeyAlgorithm()).thenReturn("RSA");
+    void testInit_UsesFallbackKey() {
+        when(props.realmPublicKeyAlgorithm()).thenReturn("RSA");
+        when(refresher.fetchPublicKey()).thenThrow(new RuntimeException("Server down"));
+        when(props.realmPublicKey()).thenReturn(generateBase64RsaPublicKey());
 
-        // Provide fallback key from properties
-        String fallbackKey = generateTestKey();
-        when(oAuthProps.realmPublicKey()).thenReturn(fallbackKey);
+        service.init();
 
-        // Act
-        tokenValidationService.init();
-
-        // Assert
-        assertNotNull(tokenValidationService.getPubKey(), "Fallback key should be loaded");
-    }
-
-    private String generateTestKey() {
-        try {
-            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
-            keyGen.initialize(2048);
-            RSAPublicKey publicKey = (RSAPublicKey) keyGen.generateKeyPair().getPublic();
-            return Base64.getEncoder().encodeToString(publicKey.getEncoded());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertNotNull(extractPubKey(service), "Fallback key must load when server fetch fails");
     }
 }
---------------------------------------------
+
+----------------------------
+@ExtendWith(MockitoExtension.class)
+class SchedulerRefreshTest {
+
+    @Mock OAuthProps props;
+    @Mock RealmPublicKeyRefresher refresher;
+    @InjectMocks TokenValidationService service;
+
+    @Test
+    void testSchedulerRefreshUpdatesKey() {
+        when(props.realmPublicKeyAlgorithm()).thenReturn("RSA");
+        when(refresher.fetchPublicKey()).thenReturn(generateBase64RsaPublicKey());
+
+        service.updateKey(refresher.fetchPublicKey());
+
+        assertNotNull(extractPubKey(service), "Scheduler refresh should update pubKey");
+    }
+}
