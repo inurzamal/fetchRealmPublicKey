@@ -1,0 +1,92 @@
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class RealmPublicKeyRefresher {
+
+    private final OAuthProps props;
+    private final TokenValidationService tokenValidationService;
+    private final RestTemplate restTemplate = new RestTemplate();
+
+    public void refreshKey() {
+        try {
+            String url = "https://" + props.baseUrl() + "/oauth/token_key";
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setBasicAuth(props.clientId(), props.secret());
+            HttpEntity<Void> request = new HttpEntity<>(headers);
+
+            ResponseEntity<Map> response = restTemplate.exchange(url, HttpMethod.GET, request, Map.class);
+
+            String pemKey = (String) response.getBody().get("value");  // PEM format
+
+            // Remove header/footer and new lines
+            String cleanKey = pemKey
+                    .replace("-----BEGIN PUBLIC KEY-----", "")
+                    .replace("-----END PUBLIC KEY-----", "")
+                    .replaceAll("\\s+", "");
+
+            tokenValidationService.updatePublicKey(cleanKey);
+
+            log.info("✅ Realm public key refreshed successfully");
+
+        } catch (Exception e) {
+            log.error("❌ Failed to refresh realmPublicKey: {}", e.getMessage());
+        }
+    }
+}
+-------------------
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class TokenValidationService {
+
+    private final OAuthProps oAuthProps;
+    private volatile RSAPublicKey pubKey;
+
+    @PostConstruct
+    public void init() {
+        updatePublicKey(oAuthProps.realmPublicKey());
+    }
+
+    public void updatePublicKey(String base64Key) {
+        try {
+            X509EncodedKeySpec keySpecX509 = new X509EncodedKeySpec(Base64.getDecoder().decode(base64Key));
+            this.pubKey = (RSAPublicKey) KeyFactory.getInstance(oAuthProps.realmPublicKeyAlgorithm())
+                    .generatePublic(keySpecX509);
+        } catch (Exception e) {
+            log.error("ERROR updating realmPublicKey: {}", e.getMessage());
+        }
+    }
+
+    public TokenValidation validateToken(String token) {
+        try {
+            Claims claims = Jwts.parser()
+                    .verifyWith(pubKey)
+                    .build()
+                    .parseSignedClaims(token)
+                    .getPayload();
+
+            return new TokenValidation(true, null,
+                    claims.get("user_name", String.class),
+                    claims.get("scope", ArrayList.class));
+
+        } catch (JwtException e) {
+            log.warn("Token validation failed: {}", e.getMessage());
+            return new TokenValidation(false, e.getMessage(), null, null);
+        }
+    }
+}
+------------------
+@Configuration
+@EnableScheduling
+@RequiredArgsConstructor
+public class RealmKeyScheduler {
+
+    private final RealmPublicKeyRefresher refresher;
+
+    // Refresh every 12 hours
+    @Scheduled(cron = "0 0 */12 * * *")
+    public void runRefresh() {
+        refresher.refreshKey();
+    }
+}
