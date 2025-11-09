@@ -90,3 +90,115 @@ public class RealmKeyScheduler {
         refresher.refreshKey();
     }
 }
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+@PostConstruct
+public void init() {
+    try {
+        log.info("🔄 Attempting to fetch latest realm public key from OAuth server...");
+        refresher.refreshKey(); // If successful, pubKey is updated
+        log.info("✅ Realm public key successfully loaded from OAuth server at startup");
+        return; // Exit method since key is successfully loaded
+    } catch (Exception e) {
+        log.warn("⚠ Failed to fetch realm public key from OAuth server: {}. Falling back to local key.",
+                e.getMessage());
+    }
+
+    // Fallback logic executes ONLY if an exception occurred in the try-block
+    try {
+        X509EncodedKeySpec keySpecX509 =
+                new X509EncodedKeySpec(Base64.getDecoder().decode(oAuthProps.realmPublicKey()));
+
+        pubKey = (RSAPublicKey) KeyFactory.getInstance(oAuthProps.realmPublicKeyAlgorithm())
+                .generatePublic(keySpecX509);
+
+        log.info("✅ Fallback realmPublicKey successfully loaded from application.properties");
+
+    } catch (InvalidKeySpecException | NoSuchAlgorithmException ex) {
+        log.error("❌ Failed to load fallback realmPublicKey from application.properties: {}", ex.getMessage());
+        // Optionally: fail startup or leave pubKey = null (but failure is safer)
+    }
+}
+---------------------------
+@ExtendWith(MockitoExtension.class)
+class TokenValidationServiceSuccessTest {
+
+    @Mock
+    private OAuthProps oAuthProps;
+
+    @Mock
+    private RealmPublicKeyRefresher refresher;
+
+    @InjectMocks
+    private TokenValidationService tokenValidationService;
+
+    @Test
+    void testInitFetchesKeySuccessfully() {
+        // Arrange: refresher.refreshKey() should succeed (do nothing)
+        doNothing().when(refresher).refreshKey();
+
+        // Act
+        tokenValidationService.init();
+
+        // Assert: pubKey should be updated by refresher
+        // refresher calls updatePublicKey(), so we simulate that
+        tokenValidationService.updatePublicKey(generateTestKey());
+
+        assertNotNull(tokenValidationService.getPubKey(), "Public key should be loaded");
+    }
+
+    // Generates a real RSA key for testing (base64 encoded X509)
+    private String generateTestKey() {
+        KeyPairGenerator keyGen;
+        try {
+            keyGen = KeyPairGenerator.getInstance("RSA");
+            keyGen.initialize(2048);
+            RSAPublicKey publicKey = (RSAPublicKey) keyGen.generateKeyPair().getPublic();
+            return Base64.getEncoder().encodeToString(publicKey.getEncoded());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+--------------------------------
+@ExtendWith(MockitoExtension.class)
+class TokenValidationServiceFallbackTest {
+
+    @Mock
+    private OAuthProps oAuthProps;
+
+    @Mock
+    private RealmPublicKeyRefresher refresher;
+
+    @InjectMocks
+    private TokenValidationService tokenValidationService;
+
+    @Test
+    void testInitFallsBackToLocalKeyWhenServerFails() {
+        // Arrange
+        doThrow(new RuntimeException("Server down")).when(refresher).refreshKey();
+        when(oAuthProps.realmPublicKeyAlgorithm()).thenReturn("RSA");
+
+        // Provide fallback key from properties
+        String fallbackKey = generateTestKey();
+        when(oAuthProps.realmPublicKey()).thenReturn(fallbackKey);
+
+        // Act
+        tokenValidationService.init();
+
+        // Assert
+        assertNotNull(tokenValidationService.getPubKey(), "Fallback key should be loaded");
+    }
+
+    private String generateTestKey() {
+        try {
+            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
+            keyGen.initialize(2048);
+            RSAPublicKey publicKey = (RSAPublicKey) keyGen.generateKeyPair().getPublic();
+            return Base64.getEncoder().encodeToString(publicKey.getEncoded());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+--------------------------------------------
