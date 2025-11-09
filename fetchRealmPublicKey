@@ -179,13 +179,7 @@ class SchedulerRefreshTest {
 }
 ++++++++++++++++++++++++++++++++++++++++++++++++
 
-keytool -importcert -noprompt \
-  -alias tpsoauth-cert \
-  -file tpsoauth.crt \
-  -keystore truststore.p12 \
-  -storetype PKCS12 \
-  -storepass changeit
-
-
+keytool -importcert -noprompt -alias tpsoauth-cert -file tpsoauth.crt -keystore truststore.p12 -storetype PKCS12 -storepass changeit
 
 keytool -list -v -keystore truststore.p12 -storepass changeit
+
