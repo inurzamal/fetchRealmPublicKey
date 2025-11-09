@@ -183,3 +183,31 @@ keytool -importcert -noprompt -alias tpsoauth-cert -file tpsoauth.crt -keystore 
 
 keytool -list -v -keystore truststore.p12 -storepass changeit
 
+---------------------------------------------------------
+
+@Configuration
+public class HttpClientConfig {
+
+    @Bean
+    public RestTemplate oauthRestTemplate() throws Exception {
+
+        char[] password = "changeit".toCharArray();
+
+        KeyStore trustStore = KeyStore.getInstance("PKCS12");
+        try (var is = getClass().getResourceAsStream("/security/truststore.p12")) {
+            trustStore.load(is, password);
+        }
+
+        SSLContext sslContext = SSLContexts.custom()
+                .loadTrustMaterial(trustStore, null)
+                .build();
+
+        HttpClient httpClient = HttpClients.custom()
+                .setSSLContext(sslContext)
+                .build();
+
+        return new RestTemplate(new HttpComponentsClientHttpRequestFactory(httpClient));
+    }
+}
+
+
