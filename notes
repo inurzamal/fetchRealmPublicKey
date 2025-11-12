@@ -1,31 +1,60 @@
+package com.citi.turnover.config;
+
+import org.apache.hc.client5.http.classic.HttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactoryBuilder;
+import org.apache.hc.core5.ssl.SSLContexts;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
+import org.springframework.web.client.RestTemplate;
+
+import javax.net.ssl.SSLContext;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.security.KeyStore;
+
+@Configuration
+public class HttpClientConfig {
+
+    @Value("${truststore.path}")
+    private String truststorePath;
+
+    @Value("${truststore.password}")
+    private String truststorePassword;
+
+    @Bean
+    public RestTemplate oauthRestTemplate() throws Exception {
+
+        KeyStore trustStore = KeyStore.getInstance("PKCS12");
         try (InputStream is = new FileInputStream(truststorePath)) {
             trustStore.load(is, truststorePassword.toCharArray());
         }
 
-        // Build SSLContext
         SSLContext sslContext = SSLContexts.custom()
                 .loadTrustMaterial(trustStore, null)
                 .build();
 
-        // ✅ Build TlsStrategy
-        var tlsStrategy = ClientTlsStrategyBuilder.create()
+        // ✅ Build SSL socket factory (still supported and safe)
+        var sslSocketFactory = SSLConnectionSocketFactoryBuilder.create()
                 .setSslContext(sslContext)
                 .build();
 
-        // ✅ Register TlsStrategy under "https"
-        var tlsRegistry = RegistryBuilder.<TlsStrategy>create()
-                .register("https", tlsStrategy)
-                .build();
+        // ✅ Build connection manager using the socket factory
+        PoolingHttpClientConnectionManager connectionManager =
+                PoolingHttpClientConnectionManagerBuilder.create()
+                        .setSSLSocketFactory(sslSocketFactory)
+                        .build();
 
-        // ✅ Build connection manager using the registry
-        var connectionManager = PoolingHttpClientConnectionManagerBuilder.create()
-                .setTlsStrategyRegistry(tlsRegistry)
-                .build();
-
-        // ✅ Build the HttpClient
+        // ✅ Build HttpClient with the manager
         HttpClient httpClient = HttpClients.custom()
                 .setConnectionManager(connectionManager)
                 .build();
 
-        // ✅ Use in RestTemplate
+        // ✅ Wrap into RestTemplate
         return new RestTemplate(new HttpComponentsClientHttpRequestFactory(httpClient));
+    }
+}
