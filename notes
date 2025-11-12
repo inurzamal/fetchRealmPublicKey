@@ -1,0 +1,31 @@
+        try (InputStream is = new FileInputStream(truststorePath)) {
+            trustStore.load(is, truststorePassword.toCharArray());
+        }
+
+        // Build SSLContext
+        SSLContext sslContext = SSLContexts.custom()
+                .loadTrustMaterial(trustStore, null)
+                .build();
+
+        // ✅ Build TlsStrategy
+        var tlsStrategy = ClientTlsStrategyBuilder.create()
+                .setSslContext(sslContext)
+                .build();
+
+        // ✅ Register TlsStrategy under "https"
+        var tlsRegistry = RegistryBuilder.<TlsStrategy>create()
+                .register("https", tlsStrategy)
+                .build();
+
+        // ✅ Build connection manager using the registry
+        var connectionManager = PoolingHttpClientConnectionManagerBuilder.create()
+                .setTlsStrategyRegistry(tlsRegistry)
+                .build();
+
+        // ✅ Build the HttpClient
+        HttpClient httpClient = HttpClients.custom()
+                .setConnectionManager(connectionManager)
+                .build();
+
+        // ✅ Use in RestTemplate
+        return new RestTemplate(new HttpComponentsClientHttpRequestFactory(httpClient));
