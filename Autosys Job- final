@@ -1,0 +1,142 @@
+1. JobNameEnum.java
+
+OAUTH_REALM_PUBLIC_KEY_REFRESH("OAuth realm public key refresh");
+---------------------------------------------------
+2. SQL INSERT for JOB_SCHEDULE table
+⚠ Use an unused numeric job_id.
+⚠ Update owner_id/secondary_id/group_name based on your environment.
+
+INSERT INTO JOB_SCHEDULE (
+    job_name,
+    job_group_name,
+    description,
+    schedule,
+    fully_qualified_class_name,
+    last_updated_at,
+    last_run_time,
+    next_run_time,
+    last_run_was_successful,
+    active,
+    owner_id,
+    secondary_id,
+    attempt_count,
+    allowed_attempt_count,
+    is_decommed
+)
+VALUES (
+    'OAuth realm public key refresh',                  -- EXACT match to enum.name
+    'SecurityMaintenance',                             -- choose appropriate group
+    'Refresh OAuth Realm Public Key from OAuth Server',
+    NULL,                                              -- no internal cron (Autosys controls)
+    'com.citi.gpae.scheduler.jobs.RealmKeyJob',        -- JOB CLASS
+    GETDATE(),
+    NULL,
+    NULL,
+    1,
+    1,      -- ACTIVE
+    1,      -- owner
+    1,      -- secondary owner
+    0,      -- attempt_count
+    5,      -- allowed_attempt_count
+    0       -- is_decommed
+);
+-----------------------------------------------------
+3. RealmKeyJob.java
+
+package com.citi.gpae.scheduler.jobs;
+
+import com.citi.gpae.entities.JobSchedule;
+import com.citi.gpae.services.RealmPublicKeyRefresher;
+import com.citi.gpae.services.TokenValidationService;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+@Service
+@Getter
+@Setter
+@Slf4j
+public class RealmKeyJob implements Runnable {
+
+    private JobSchedule jobSchedule;
+
+    private final TokenValidationService tokenValidationService;
+    private final RealmPublicKeyRefresher refresher;
+
+    @Override
+    public void run() {
+        log.info("▶ Running job: {}", jobSchedule.getJobName());
+
+        try {
+            String newKey = refresher.fetchPublicKey();
+            tokenValidationService.updateKey(newKey);
+
+            log.info("✅ OAuth public key refreshed successfully");
+        } catch (Exception e) {
+            log.error("❌ Error refreshing OAuth public key", e);
+        }
+    }
+}
+-------------------------------------------
+4. RealmKeyController.java
+package com.citi.gpae.scheduler.controllers;
+
+import com.citi.gpae.entities.JobSchedule;
+import com.citi.gpae.enums.JobNameEnum;
+import com.citi.gpae.repositories.JobScheduleRepository;
+import com.citi.gpae.services.RealmPublicKeyRefresher;
+import com.citi.gpae.services.TokenValidationService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.*;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequiredArgsConstructor
+@Slf4j
+@RequestMapping(path = "/api/scheduler", produces = MediaType.APPLICATION_JSON_VALUE)
+public class RealmKeyController {
+
+    private final JobScheduleRepository jobScheduleRepository;
+    private final TokenValidationService tokenValidationService;
+    private final RealmPublicKeyRefresher refresher;
+
+    @GetMapping("/refreshOAuthKey")
+    public ResponseEntity<String> refreshOAuthKey() {
+
+        JobSchedule job = jobScheduleRepository
+                .findByJobName(JobNameEnum.OAUTH_REALM_PUBLIC_KEY_REFRESH.getName());
+
+        if (!job.isActive()) {
+            return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                    .body("Job is inactive");
+        }
+
+        log.info("🔄 Autosys requested OAuth public key refresh");
+
+        try {
+            tokenValidationService.updateKey(refresher.fetchPublicKey());
+            return ResponseEntity.ok("OAuth public key refreshed successfully");
+        } catch (Exception e) {
+            log.error("Error refreshing key", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error refreshing key: " + e.getMessage());
+        }
+    }
+}
+------------------------------------------
+5. Autosys JIL Example (FINAL)- jil
+
+insert_job: OAUTH_REALM_PUBLIC_KEY_REFRESH
+job_type: c
+command: curl -X GET "https://your-app-url/api/scheduler/refreshOAuthKey" \
+         -H "X-API-KEY: YOUR_SCHEDULER_KEY"
+machine: autosys-agent-host
+owner: youruser@yourdomain
+permission: gx,ge,wx
+description: "Refresh OAuth realm public key"
+std_out_file: /logs/oauth_key_refresh.out
+std_err_file: /logs/oauth_key_refresh.err
+alarm_if_fail: 1
+start_times: "04:00"
