@@ -1,0 +1,26 @@
+@RestController
+@RequestMapping("/internal")
+@RequiredArgsConstructor
+@Slf4j
+public class KeyRefreshController {
+
+    private final TokenValidationService tokenValidationService;
+    private final RealmPublicKeyRefresher refresher;
+
+    @PostMapping("/refresh-oauth-key")
+    public ResponseEntity<String> refreshKey() {
+        log.info("🔄 Autosys-triggered public key refresh started...");
+
+        try {
+            String newKey = refresher.fetchPublicKey();
+            tokenValidationService.updateKey(newKey);
+
+            log.info("✅ Public key refreshed successfully via Autosys");
+            return ResponseEntity.ok("Public key refreshed");
+        } catch (Exception ex) {
+            log.error("❌ Error refreshing key via Autosys: {}", ex.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Refresh failed: " + ex.getMessage());
+        }
+    }
+}
